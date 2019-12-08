@@ -5,7 +5,9 @@ import java.awt.event.{ActionEvent, ActionListener, AdjustmentEvent, AdjustmentL
 import java.awt.{Color, Component, Dimension, GridBagConstraints, Insets}
 import java.io.{File, FileInputStream, FileReader, InputStream, InputStreamReader, Reader}
 import java.nio.charset.{Charset, StandardCharsets}
+import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.regex.Pattern
 
 import Load.{semanticClass, sus}
 import com.github.tototoshi.csv.{CSVReader, DefaultCSVFormat}
@@ -193,7 +195,16 @@ object Load extends App {
         println(e)
         throw e
     }
-    val languages = stream.head
+    val languages = stream.head.map{longForm =>
+      Try{
+        val m = "(.*) [(](.*)[)]".r.findAllMatchIn(longForm).next()
+        val language = m.group(1)
+        val country = m.group(2)
+        val cc = Locale.getISOCountries.map(new Locale("",_)).find(_.getDisplayCountry(Locale.US) == country)
+        val lc = Locale.getISOLanguages.map(new Locale(_)).find(_.getDisplayLanguage(Locale.US)==language)
+        lc.get.getLanguage +"-"+ cc.get.getCountry
+      }.getOrElse(longForm)
+    }
     for (language <- languages if !dictionaries.contains(language)) {
       dictionaries += language -> new Hashtable[String, Int]
       langIds += language -> langIds.size
@@ -248,17 +259,15 @@ object Load extends App {
 //    } else throw new NoSuchElementException
 //  }
 
-  class Scanner(var from: Int, to: Int, r: Regex) {
+  class Scanner(var from: Int, to: Int, r: Pattern) {
     val slice = texts.slice(from, to)
 
     def next(): Future[Int] = Future {
       def index(): Int = if (from < to) {
         while (from < to) {
-          r.findFirstIn(texts(from)) match {
-            case Some(_) =>
+          if(r.matcher(texts(from)).find())  {
               from += 1
               return from - 1
-            case None =>
           }
           from += 1
         }
@@ -271,7 +280,7 @@ object Load extends App {
     }
   }
 
-  def scan(regExp: Regex, from: Int = 0): Iterator[Int] = new Iterator[Int] {
+  def scan(regExp: Pattern, from: Int = 0): Iterator[Int] = new Iterator[Int] {
 
     import concurrent.ExecutionContext.Implicits.global
 
@@ -313,9 +322,6 @@ object Load extends App {
   }
 
 
-
-
-  val hits = scan("management".r).flatMap(translations).take(20)
   swing {
     Screen.search.setEditable(true)
     Screen.search.setEnabled(true)
@@ -476,11 +482,12 @@ object Load extends App {
     consolidate(semanticClasses)
   }
 
-  def comp(regex: Regex, texts: String*): Component = {
+  def comp(regexp: Pattern, texts: String*): Component = {
     def decorate(string: String) = {
       val buffer = new StringBuffer()
       var start = 0
-      for (m <- regex.findAllMatchIn(string)) {
+      val m = regexp.matcher(string)
+      while (m find start) {
         if (m.start > start) buffer append string.substring(start, m.start)
         buffer append "<b>"
         buffer append string.substring(m.start, m.end)
@@ -500,13 +507,13 @@ object Load extends App {
     label
   }
 
-  var regexp = "".r
+  var regexp = Option.empty[Pattern]
   var scans = Option.empty[Iterator[Int]]
   var sus = Set.empty[Int]
-  def render[T](means:Int)(ret: =>T) = {
+  def render[T](regexp: Pattern,means:Int)(ret: =>T) = {
     sus += means
     val phrases = translations(means)
-    val t = phrases.map(texts).groupBy(regexp.findFirstIn(_).isDefined).view.mapValues(_.toSet.toSeq)
+    val t = phrases.map(texts).groupBy(regexp.matcher(_).find()).view.mapValues(_.toSet.toSeq)
     val (left,right) = if (t contains false) (t(true), t(false)) else {
       val list = t(true).toList
       list.splitAt((list.size+1)/2)
@@ -523,12 +530,12 @@ object Load extends App {
       c.fill = GridBagConstraints.HORIZONTAL
       Screen.pane.add(comp(regexp,left:_*), c)
       c.gridx = 1
-      Screen.pane.add(comp(regexp, right:_*), c)
+      Screen.pane.add(comp(regexp,right:_*), c)
       Screen.pane.revalidate()
       ret
     }
   }
-  def more() = {
+  def more() = regexp foreach { pattern =>
 
     runner = executor.submit(new Runnable {
         override def run(): Unit = {
@@ -551,7 +558,7 @@ object Load extends App {
                   println("interrupted")
                   Future successful 0
                 } else {
-                  render(means)(n - 1).transformWith(findAndDisplay)
+                  render(pattern,means)(n - 1).transformWith(findAndDisplay)
                 }
             }
           case _ => Future.successful(0)
@@ -594,10 +601,13 @@ object Load extends App {
       }
       override def run(): Unit = {
         val drawn = clear()
-        regexp = search.r
-        if (search.isEmpty) return
-
-        scans = Some(scan(regexp))
+        if (search.size<2) {
+          regexp = None
+          return
+        }
+        val pattern = Pattern.compile(search,Pattern.CASE_INSENSITIVE|Pattern.CASE_INSENSITIVE)
+        regexp = Some(pattern) // for more()
+        scans = Some(scan(pattern))
         scans.get.hasNext
 
 
@@ -615,7 +625,7 @@ object Load extends App {
                   println("interrupted")
                   Future successful true
                 } else {
-                  render(means)(vscroll.isVisible).transformWith(findAndDisplay)
+                  render(pattern,means)(vscroll.isVisible).transformWith(findAndDisplay)
                 }
             }
           case _ => Future.successful(true)
